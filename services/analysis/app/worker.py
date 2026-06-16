@@ -1,66 +1,81 @@
-"""Job worker — polls the Postgres `jobs` table and runs analysis.
+"""Job worker — claims `analyze_game` jobs and runs the Game Review pipeline.
 
-The queue IS the `jobs` table (scale-appropriate; no broker at one-user scale).
-Claim rows with `FOR UPDATE SKIP LOCKED` so concurrent workers never
-double-process. Priority column: interactive jobs (a game you just imported)
-beat background jobs. See the vault architecture doc.
+The queue IS the `job` table (no broker at this scale). Claim with FOR UPDATE
+SKIP LOCKED, dispatch by type, write results to Postgres, mark done/error.
 
-Sprint 0: skeleton loop + the claim query. Handlers land in Sprint 1+.
+Run:
+    python -m app.worker                 # daemon: poll forever
+    python -m app.worker --max 2         # process up to 2 jobs then exit (testing)
+    python -m app.worker --max 2 --depth 14 --multipv 3
 """
 
 from __future__ import annotations
 
+import argparse
 import time
+import traceback
 
-import psycopg
-
+from app import db
+from app.adapters.eval_cache import EvalCache
+from app.adapters.stockfish import StockfishAdapter
 from app.config import settings
-
-CLAIM_SQL = """
-UPDATE jobs
-SET status = 'running', locked_at = now(), attempts = attempts + 1
-WHERE id = (
-    SELECT id FROM jobs
-    WHERE status = 'pending'
-    ORDER BY priority DESC, created_at ASC
-    FOR UPDATE SKIP LOCKED
-    LIMIT 1
-)
-RETURNING id, type, payload;
-"""
+from app.core.analysis import review_game
 
 
-def handle(job_type: str, payload: dict) -> None:
-    # TODO(Sprint 1+): dispatch by type.
-    #   analyze_game      -> per-ply EvalCachePort -> classify -> accuracy -> analyses
-    #   rebuild_insights  -> weakness/opening reports (Sprint 3)
-    #   generate_puzzles  -> lichess-puzzler over the user's PGNs (Sprint 3)
-    #   warm_opening_cache, generate_variation_tree (Sprint 5), ...
-    raise NotImplementedError(f"no handler for job type: {job_type}")
+def handle_analyze_game(conn, payload: dict, *, depth: int, multipv: int) -> None:
+    game_id = payload["gameId"]
+    g = db.get_game(conn, game_id)
+    if g is None:
+        raise ValueError(f"game {game_id} not found")
+    # One engine process for the whole game (fast); cache shared across positions.
+    with StockfishAdapter() as engine:
+        cache = EvalCache(engine, conn, multipv=multipv, depth=depth)
+        result = review_game(g["pgn"], cache.get_lines)
+    db.save_analysis(conn, game_id, depth, result)
 
 
-def run() -> None:
-    # TODO(Sprint 1): the `jobs` table is created by the TS Drizzle schema
-    # (packages/db). Until it exists this loop will no-op/log.
-    conn = psycopg.connect(settings.database_url, autocommit=True)
+def process_one(conn, *, depth: int, multipv: int) -> bool:
+    job = db.claim_job(conn)
+    if job is None:
+        return False
+    jid, jtype, payload = job["id"], job["type"], job["payload"]
+    try:
+        if jtype == "analyze_game":
+            handle_analyze_game(conn, payload, depth=depth, multipv=multipv)
+        else:
+            raise ValueError(f"unknown job type: {jtype}")
+        db.finish_job(conn, jid, "done")
+        print(f"✓ job {jid} ({jtype})")
+    except Exception as e:  # noqa: BLE001 — worker must survive any single job
+        db.finish_job(conn, jid, "error", error=str(e))
+        if isinstance(payload, dict) and payload.get("gameId"):
+            db.fail_analysis(conn, payload["gameId"], str(e))
+        print(f"✗ job {jid} ({jtype}): {e}")
+        traceback.print_exc()
+    return True
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--max", type=int, default=0, help="process at most N jobs then exit (0 = forever)")
+    ap.add_argument("--depth", type=int, default=settings.deep_depth)
+    ap.add_argument("--multipv", type=int, default=settings.multipv)
+    args = ap.parse_args()
+
+    conn = db.connect()
+    processed = 0
     while True:
-        with conn.cursor() as cur:
-            try:
-                cur.execute(CLAIM_SQL)
-                row = cur.fetchone()
-            except psycopg.Error:
-                row = None  # jobs table not created yet
-        if row is None:
+        did = process_one(conn, depth=args.depth, multipv=args.multipv)
+        if did:
+            processed += 1
+            if args.max and processed >= args.max:
+                break
+        elif args.max:  # bounded mode: stop when the queue drains
+            break
+        else:
             time.sleep(settings.job_poll_interval)
-            continue
-        _id, job_type, payload = row
-        try:
-            handle(job_type, payload)
-            # TODO: mark done
-        except Exception:  # noqa: BLE001 — skeleton
-            # TODO: backoff / dead-letter after N attempts
-            pass
+    print(f"done; processed {processed} job(s)")
 
 
 if __name__ == "__main__":
-    run()
+    main()

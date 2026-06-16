@@ -1,10 +1,16 @@
 """StockfishAdapter — EnginePort implementation via python-chess UCI.
 
-Stockfish runs as a separate process (UCI). This is the standard, license-clean
-arrangement (GPL engine behind a process boundary; nothing is statically linked).
+Stockfish runs as a separate process (UCI) — the standard, license-clean
+arrangement (GPL engine behind a process boundary; nothing statically linked).
 
-Prefer a fixed `depth` (or nodes) limit for reproducible accuracy numbers — the
-same reason Lichess uses a node limit. See game-review-build-spec.md.
+Use as a context manager to keep ONE engine process alive across a whole game
+(open once, analyse every position, close) — far faster than spawning per call:
+
+    with StockfishAdapter() as engine:
+        lines = engine.analyse(board, multipv=3, depth=18)
+
+Used outside a context (e.g. /debug/eval), it opens and closes per call.
+Prefer a fixed depth (or nodes) for reproducible accuracy numbers.
 """
 
 from __future__ import annotations
@@ -19,21 +25,35 @@ from app.core.ports import Line
 class StockfishAdapter:
     def __init__(self, path: str | None = None) -> None:
         self._path = path or settings.stockfish_path
+        self._engine: chess.engine.SimpleEngine | None = None
 
-    def analyse(self, fen: str, *, multipv: int, depth: int) -> list[Line]:
-        board = chess.Board(fen)
-        # One short-lived engine process per call for the skeleton. A real
-        # deployment keeps a pooled set of long-lived engines (see worker.py /
-        # the "fishnet-style worker pool" in the architecture doc).
-        with chess.engine.SimpleEngine.popen_uci(self._path) as engine:
+    def __enter__(self) -> StockfishAdapter:
+        self._engine = chess.engine.SimpleEngine.popen_uci(self._path)
+        self._engine.configure(
+            {"Threads": settings.engine_threads, "Hash": settings.engine_hash_mb}
+        )
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        if self._engine is not None:
+            self._engine.quit()
+            self._engine = None
+
+    def analyse(self, board: chess.Board | str, *, multipv: int, depth: int) -> list[Line]:
+        if isinstance(board, str):
+            board = chess.Board(board)
+
+        own = self._engine is None
+        engine = self._engine or chess.engine.SimpleEngine.popen_uci(self._path)
+        if own:
             engine.configure(
                 {"Threads": settings.engine_threads, "Hash": settings.engine_hash_mb}
             )
-            infos = engine.analyse(
-                board,
-                chess.engine.Limit(depth=depth),
-                multipv=multipv,
-            )
+        try:
+            infos = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=multipv)
+        finally:
+            if own:
+                engine.quit()
 
         lines: list[Line] = []
         for info in infos:
@@ -42,8 +62,8 @@ class StockfishAdapter:
             lines.append(
                 Line(
                     move=pv[0] if pv else "",
-                    cp=score.score(),  # None if mate
-                    mate=score.mate(),  # None if cp
+                    cp=score.score(),
+                    mate=score.mate(),
                     pv=pv,
                     depth=info.get("depth", depth),
                 )
