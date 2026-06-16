@@ -1,0 +1,23 @@
+[project]
+name = "caissa-analysis"
+version = "0.0.1"
+description = "Caïssa analysis service — server-side Stockfish + python-chess (ports & adapters). See ../../README.md and the vault architecture doc."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "python-chess>=1.999",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "psycopg[binary]>=3.2",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.7", "pytest>=8.3"]
+
+[tool.ruff]
+line-length = 100
+
+# Caïssa is clean-room / closeable: original code on permissive deps.
+# Stockfish (GPL) is invoked as a separate process via UCI (process boundary) — not linked.

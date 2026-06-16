@@ -1,0 +1,3 @@
+{
+  "extends": "@caissa/config/tsconfig.base.json"
+}

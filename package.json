@@ -1,0 +1,38 @@
+{
+  "name": "caissa",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "type": "module",
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "check-types": "turbo check-types",
+    "dev:web": "turbo -F web dev",
+    "dev:server": "turbo -F server dev",
+    "db:push": "turbo -F @caissa/db db:push",
+    "db:studio": "turbo -F @caissa/db db:studio",
+    "db:generate": "turbo -F @caissa/db db:generate",
+    "db:migrate": "turbo -F @caissa/db db:migrate",
+    "db:start": "turbo -F @caissa/db db:start",
+    "db:watch": "turbo -F @caissa/db db:watch",
+    "db:stop": "turbo -F @caissa/db db:stop",
+    "db:down": "turbo -F @caissa/db db:down",
+    "check": "biome check --write ."
+  },
+  "dependencies": {
+    "@caissa/env": "workspace:*",
+    "dotenv": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.16",
+    "@caissa/config": "workspace:*",
+    "@types/node": "^22.13.14",
+    "turbo": "^2.9.16",
+    "typescript": "catalog:"
+  },
+  "packageManager": "pnpm@10.9.0"
+}
