@@ -39,9 +39,22 @@ class StockfishAdapter:
             self._engine.quit()
             self._engine = None
 
-    def analyse(self, board: chess.Board | str, *, multipv: int, depth: int) -> list[Line]:
+    def analyse(
+        self,
+        board: chess.Board | str,
+        *,
+        multipv: int,
+        nodes: int | None = None,
+        depth: int | None = None,
+    ) -> list[Line]:
         if isinstance(board, str):
             board = chess.Board(board)
+        if nodes:
+            limit = chess.engine.Limit(nodes=nodes)
+        elif depth:
+            limit = chess.engine.Limit(depth=depth)
+        else:
+            raise ValueError("analyse requires nodes or depth")
 
         own = self._engine is None
         engine = self._engine or chess.engine.SimpleEngine.popen_uci(self._path)
@@ -50,7 +63,7 @@ class StockfishAdapter:
                 {"Threads": settings.engine_threads, "Hash": settings.engine_hash_mb}
             )
         try:
-            infos = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=multipv)
+            infos = engine.analyse(board, limit, multipv=multipv)
         finally:
             if own:
                 engine.quit()

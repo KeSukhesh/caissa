@@ -22,9 +22,13 @@ class Settings(BaseSettings):
     # Analysis defaults (Game Review — see game-review-build-spec.md).
     # MultiPV >= 2 is required for only-move / 2nd-line gap (Great detection).
     multipv: int = 3
-    quick_depth: int = 13   # pass 1: instant provisional
-    deep_depth: int = 18    # pass 2: authoritative, overwrites pass 1
-    engine_threads: int = 1
+    # Analyse to a fixed NODE budget (not depth) so effort is consistent across
+    # positions of varying complexity → reproducible accuracy numbers. This is
+    # what Lichess does (≈2.25M nodes for NNUE Stockfish). See game-review-build-spec.md.
+    deep_nodes: int = 2_250_000  # pass 2: authoritative review
+    quick_nodes: int = 200_000  # pass 1: instant provisional (future two-pass)
+    quick_depth: int = 13  # depth fallback (used only by /debug/eval)
+    engine_threads: int = 1  # single thread → deterministic per node budget
     engine_hash_mb: int = 128
 
     # Lichess cloud-eval fast path (tier 2 of the 3-tier eval cache).

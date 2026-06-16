@@ -23,11 +23,17 @@ def normalize_fen(fen: str) -> str:
 
 
 class EvalCache:
-    def __init__(self, engine, conn, *, multipv: int, depth: int) -> None:
+    def __init__(self, engine, conn, *, multipv: int, nodes: int) -> None:
         self.engine = engine
         self.conn = conn
         self.multipv = multipv
-        self.depth = depth
+        self.nodes = nodes
+        self.min_depth: int | None = None  # floor reached depth (hardest position)
+
+    def _track_depth(self, lines: list[Line]) -> None:
+        if lines:
+            d = lines[0].depth
+            self.min_depth = d if self.min_depth is None else min(self.min_depth, d)
 
     def get_lines(self, board: chess.Board) -> list[Line]:
         nfen = normalize_fen(board.fen())
@@ -36,20 +42,25 @@ class EvalCache:
             row = cur.fetchone()
         if row:
             cached = row["eval"]
-            if cached.get("depth", 0) >= self.depth and cached.get("multipv", 0) >= self.multipv:
-                return [Line(**ln) for ln in cached["lines"]][: self.multipv]
+            # Reuse only if the cached entry used at least as many nodes + lines.
+            if cached.get("nodes", 0) >= self.nodes and cached.get("multipv", 0) >= self.multipv:
+                lines = [Line(**ln) for ln in cached["lines"]][: self.multipv]
+                self._track_depth(lines)
+                return lines
 
-        lines = self.engine.analyse(board, multipv=self.multipv, depth=self.depth)
+        lines = self.engine.analyse(board, multipv=self.multipv, nodes=self.nodes)
+        self._track_depth(lines)
         payload = {
             "lines": [ln.__dict__ for ln in lines],
-            "depth": self.depth,
+            "nodes": self.nodes,
             "multipv": self.multipv,
         }
+        reached = lines[0].depth if lines else None
         with self.conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO eval_cache (normalized_fen, eval, depth, source) "
                 "VALUES (%s, %s, %s, 'stockfish') "
                 "ON CONFLICT (normalized_fen) DO UPDATE SET eval = EXCLUDED.eval, depth = EXCLUDED.depth",
-                (nfen, Json(payload), self.depth),
+                (nfen, Json(payload), reached),
             )
         return lines

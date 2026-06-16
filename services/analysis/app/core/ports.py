@@ -27,18 +27,21 @@ class Line:
 
 
 class EnginePort(Protocol):
-    """Drive a UCI engine (Stockfish). MultiPV >= 2 for only-move detection."""
+    """Drive a UCI engine (Stockfish). MultiPV >= 2 for only-move detection.
+    Limit by `nodes` (preferred — reproducible) or `depth`."""
 
-    def analyse(self, fen: str, *, multipv: int, depth: int) -> list[Line]: ...
+    def analyse(
+        self, fen: str, *, multipv: int, nodes: int | None = None, depth: int | None = None
+    ) -> list[Line]: ...
 
 
 class EvalCachePort(Protocol):
     """3-tier eval lookup: local cache -> Lichess cloud-eval -> own Stockfish.
 
-    Returns the top `multipv` lines for a position, caching the result.
+    Returns the top `multipv` lines for a position (at a node budget), caching it.
     """
 
-    def get_eval(self, fen: str, *, multipv: int, depth: int) -> list[Line]: ...
+    def get_lines(self, board, *, multipv: int, nodes: int) -> list[Line]: ...
 
 
 # --- Declared for later sprints (not implemented in Sprint 0) -----------------

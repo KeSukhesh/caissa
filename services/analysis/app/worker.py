@@ -22,26 +22,29 @@ from app.config import settings
 from app.core.analysis import review_game
 
 
-def handle_analyze_game(conn, payload: dict, *, depth: int, multipv: int) -> None:
+def handle_analyze_game(conn, payload: dict, *, nodes: int, multipv: int) -> None:
     game_id = payload["gameId"]
     g = db.get_game(conn, game_id)
     if g is None:
         raise ValueError(f"game {game_id} not found")
     # One engine process for the whole game (fast); cache shared across positions.
     with StockfishAdapter() as engine:
-        cache = EvalCache(engine, conn, multipv=multipv, depth=depth)
+        cache = EvalCache(engine, conn, multipv=multipv, nodes=nodes)
         result = review_game(g["pgn"], cache.get_lines)
-    db.save_analysis(conn, game_id, depth, result)
+    result["summary"]["engineNodes"] = nodes
+    # engine_depth = floor reached depth (hardest position); the node budget is the
+    # reproducibility knob and lives in summary.engineNodes.
+    db.save_analysis(conn, game_id, cache.min_depth or 0, result)
 
 
-def process_one(conn, *, depth: int, multipv: int) -> bool:
+def process_one(conn, *, nodes: int, multipv: int) -> bool:
     job = db.claim_job(conn)
     if job is None:
         return False
     jid, jtype, payload = job["id"], job["type"], job["payload"]
     try:
         if jtype == "analyze_game":
-            handle_analyze_game(conn, payload, depth=depth, multipv=multipv)
+            handle_analyze_game(conn, payload, nodes=nodes, multipv=multipv)
         else:
             raise ValueError(f"unknown job type: {jtype}")
         db.finish_job(conn, jid, "done")
@@ -58,14 +61,14 @@ def process_one(conn, *, depth: int, multipv: int) -> bool:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--max", type=int, default=0, help="process at most N jobs then exit (0 = forever)")
-    ap.add_argument("--depth", type=int, default=settings.deep_depth)
+    ap.add_argument("--nodes", type=int, default=settings.deep_nodes, help="Stockfish node budget per position")
     ap.add_argument("--multipv", type=int, default=settings.multipv)
     args = ap.parse_args()
 
     conn = db.connect()
     processed = 0
     while True:
-        did = process_one(conn, depth=args.depth, multipv=args.multipv)
+        did = process_one(conn, nodes=args.nodes, multipv=args.multipv)
         if did:
             processed += 1
             if args.max and processed >= args.max:
