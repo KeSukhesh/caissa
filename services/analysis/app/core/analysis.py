@@ -14,7 +14,7 @@ from __future__ import annotations
 import io
 import math
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import chess
 import chess.pgn
@@ -32,6 +32,13 @@ PIECE_VALUES = {
 
 # Win%-loss thresholds (in win-percentage points) for move classification.
 T_EXCELLENT, T_GOOD, T_INACCURACY, T_MISTAKE = 2.0, 5.0, 10.0, 20.0
+
+# Brilliant/Great gating (kept deliberately strict — these should be RARE).
+CRIT_LO, CRIT_HI = 15.0, 85.0  # position must be genuinely undecided
+GREAT_GAP = 20.0  # 2nd-best move must drop >=20% (i.e. the only move avoiding a serious error)
+BRILLIANT_MIN_SAC = 2  # net material invested (pawns) after the best line settles
+SAC_PV_PLIES = 8  # settle material over this many plies of the engine's best continuation
+MIN_SPECIAL_PLY = 8  # no Brilliant/Great in the opening (proxy until book detection)
 
 
 def win_pct(cp: int | None, mate: int | None) -> float:
@@ -64,6 +71,7 @@ class _Rec:
     gap: float  # win% gap best vs 2nd-best (mover POV) → only-move signal
     cp_white: int | None
     mate_white: int | None
+    pv: list[str] = field(default_factory=list)  # best line's principal variation (UCI)
 
 
 def _evaluate(board: chess.Board, eval_fn) -> _Rec:
@@ -84,22 +92,24 @@ def _evaluate(board: chess.Board, eval_fn) -> _Rec:
     else:
         cp_white = -best.cp if best.cp is not None else None
         mate_white = -best.mate if best.mate is not None else None
-    return _Rec(wm, white_win, best.move, gap, cp_white, mate_white)
+    return _Rec(wm, white_win, best.move, gap, cp_white, mate_white, pv=best.pv)
 
 
-def _is_sacrifice(board: chess.Board, move: chess.Move, opp_best_uci: str | None) -> bool:
-    """True if the move invests ~a minor piece of material once the opponent's
-    best reply is played (filters out equal trades / simple recaptures)."""
+def _is_sacrifice(board: chess.Board, move: chess.Move, continuation_pv: list[str]) -> bool:
+    """True if the move genuinely INVESTS material — i.e. the mover is still down
+    >= BRILLIANT_MIN_SAC after the engine's best continuation plays out. Settling
+    over several plies (not just one reply) is what excludes combinations that win
+    the material straight back, and simple recaptures."""
     mover = board.turn
     before = material_balance(board, mover)
-    b2 = board.copy()
-    b2.push(move)
-    if opp_best_uci:
+    b = board.copy()
+    b.push(move)
+    for uci in continuation_pv[:SAC_PV_PLIES]:
         try:
-            b2.push(chess.Move.from_uci(opp_best_uci))
+            b.push(chess.Move.from_uci(uci))
         except (ValueError, AssertionError):
-            pass
-    return (before - material_balance(b2, mover)) >= 2
+            break
+    return (before - material_balance(b, mover)) >= BRILLIANT_MIN_SAC
 
 
 def _classify(
@@ -109,14 +119,17 @@ def _classify(
     win_after: float,
     gap: float,
     sacrifice: bool,
+    ply: int,
+    is_recapture: bool,
 ) -> str:
     if is_best:
-        # Brilliant/Great only in undecided positions (not already won/lost).
-        critical = 10.0 < win_before < 90.0
-        if sacrifice and critical and win_after >= 50.0:
-            return "brilliant"
-        if gap >= 10.0 and critical:
-            return "great"
+        # Brilliant/Great are deliberately rare: only on the best move, in a
+        # genuinely undecided position, past the opening, and not a recapture.
+        eligible = ply >= MIN_SPECIAL_PLY and CRIT_LO < win_before < CRIT_HI and not is_recapture
+        if eligible and sacrifice and win_after >= 50.0:
+            return "brilliant"  # sound material sacrifice that stays at least equal
+        if eligible and gap >= GREAT_GAP:
+            return "great"  # the only move avoiding a serious error
         return "best"
     if loss < T_EXCELLENT:
         return "excellent"
@@ -175,8 +188,14 @@ def review_game(pgn: str, eval_fn) -> dict:
         win_after = 100.0 - after.win_mover  # convert opponent POV → mover POV
         loss = max(0.0, win_before - win_after)
         is_best = before.best_move is not None and mv.uci() == before.best_move
-        sac = _is_sacrifice(boards[i], mv, after.best_move)
-        cls = _classify(is_best, loss, win_before, win_after, before.gap, sac)
+        is_recapture = (
+            i > 0 and boards[i].is_capture(mv) and moves[i - 1].to_square == mv.to_square
+        )
+        # Settle material over the engine's best continuation FROM the resulting position.
+        sac = _is_sacrifice(boards[i], mv, after.pv)
+        cls = _classify(
+            is_best, loss, win_before, win_after, before.gap, sac, i + 1, is_recapture
+        )
         move_accs.append(("white" if mover_white else "black", move_accuracy(win_before, win_after)))
         moves_out.append(
             {
